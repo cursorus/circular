@@ -1,0 +1,41 @@
+name: Build
+on:
+  push:
+    paths: ['*.zip']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack tweak
+        run: |
+          mkdir -p src
+          unzip -oq circular.zip -d src
+          MK=$(find src -maxdepth 2 -name Makefile | head -n1)
+          echo "DIR=$(dirname "$MK")" >> "$GITHUB_ENV"
+
+      - name: Install tools
+        run: brew install ldid make dpkg
+
+      - name: Install Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          git clone --depth 1 https://github.com/theos/sdks.git /tmp/sdks
+          cp -R /tmp/sdks/*.sdk "$HOME/theos/sdks/"
+
+      - name: Build
+        run: cd "$DIR" && gmake package FINALPACKAGE=1
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.0.${{ github.run_number }}
+          name: circular ${{ github.run_number }}
+          files: ${{ env.DIR }}/packages/*.deb
