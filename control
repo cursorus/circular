@@ -1,0 +1,9 @@
+Package: com.cursorus.circular
+Name: circular
+Depends: mobilesubstrate, preferenceloader
+Version: 0.0.1
+Architecture: iphoneos-arm
+Description: Round icons in a staggered grid (4-3-4-3 or 3-4-3-4)
+Maintainer: cursorus
+Author: cursorus
+Section: Tweaks

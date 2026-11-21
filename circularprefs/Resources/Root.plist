@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>items</key>
+	<array>
+		<dict>
+			<key>cell</key><string>PSGroupCell</string>
+			<key>label</key><string>circular</string>
+			<key>footerText</key><string>Ряд, с которого начинается сетка. Если что-то не обновилось, сделай респринг.</string>
+		</dict>
+		<dict>
+			<key>cell</key><string>PSSwitchCell</string>
+			<key>label</key><string>Включить</string>
+			<key>key</key><string>enabled</string>
+			<key>default</key><true/>
+			<key>defaults</key><string>com.cursorus.circular</string>
+			<key>PostNotification</key><string>com.cursorus.circular/prefschanged</string>
+		</dict>
+		<dict>
+			<key>cell</key><string>PSSegmentCell</string>
+			<key>key</key><string>firstRow</string>
+			<key>default</key><integer>4</integer>
+			<key>defaults</key><string>com.cursorus.circular</string>
+			<key>validTitles</key>
+			<array><string>4-3-4-3</string><string>3-4-3-4</string></array>
+			<key>validValues</key>
+			<array><integer>4</integer><integer>3</integer></array>
+			<key>PostNotification</key><string>com.cursorus.circular/prefschanged</string>
+		</dict>
+	</array>
+	<key>title</key><string>circular</string>
+</dict>
+</plist>

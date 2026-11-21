@@ -1,7 +1,7 @@
 name: Build
 on:
   push:
-    paths: ['*.zip']
+    paths-ignore: ['README.md']
   workflow_dispatch:
 
 permissions:
@@ -13,12 +13,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Unpack tweak
+      - name: Locate tweak
         run: |
-          mkdir -p src
-          unzip -oq circular.zip -d src
-          MK=$(find src -maxdepth 2 -name Makefile | head -n1)
-          echo "DIR=$(dirname "$MK")" >> "$GITHUB_ENV"
+          if [ -f Makefile ]; then
+            echo "DIR=." >> "$GITHUB_ENV"
+          else
+            mkdir -p src
+            unzip -oq circular.zip -d src
+            MK=$(find src -maxdepth 2 -name Makefile | head -n1)
+            echo "DIR=$(dirname "$MK")" >> "$GITHUB_ENV"
+          fi
 
       - name: Install tools
         run: brew install ldid make dpkg
@@ -29,7 +33,7 @@ jobs:
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           git clone --depth 1 https://github.com/theos/sdks.git /tmp/sdks
           cp -R /tmp/sdks/*.sdk "$HOME/theos/sdks/"
-           
+
       - name: Set version
         run: |
           sed -i '' "s/^Version:.*/Version: 0.0.${{ github.run_number }}/" "$DIR/control"
