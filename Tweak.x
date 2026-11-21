@@ -1,10 +1,12 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <CoreMotion/CoreMotion.h>
 
 struct SBIconCoordinate { long long row; long long col; };
 
 @interface SBIconView : UIView
 + (CGSize)defaultIconSize;
+- (id)icon;
 @end
 @interface SBIconImageView : UIView
 @end
@@ -28,8 +30,14 @@ struct SBIconCoordinate { long long row; long long col; };
 + (instancetype)sharedInstance;
 - (SBFolder *)rootFolder;
 - (id)grabbedIcon;
+- (BOOL)isEditing;
 @end
 @interface SpringBoard : UIApplication
+- (id)_accessibilityFrontMostApplication;
+@end
+@interface SBLockScreenManager : NSObject
++ (instancetype)sharedInstance;
+- (BOOL)isUILocked;
 @end
 @interface SBSearchGesture : NSObject
 + (instancetype)sharedInstance;
@@ -41,6 +49,9 @@ struct SBIconCoordinate { long long row; long long col; };
 @end
 
 static BOOL gEnabled = YES;
+static BOOL gGravity = YES;         // shake -> gravity
+static BOOL gGravityActive = NO;
+static NSHashTable *gLists;         // visible root icon lists
 static NSInteger gFirstRow = 4; // 4 -> 4-3-4-3, 3 -> 3-4-3-4
 
 #pragma mark - utils
@@ -61,6 +72,7 @@ static void CIRLog(NSString *fmt, ...) {
 static void loadPrefs(void) {
     NSDictionary *p = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.cursorus.circular.plist"];
     gEnabled = p[@"enabled"] ? [p[@"enabled"] boolValue] : YES;
+    gGravity = p[@"gravity"] ? [p[@"gravity"] boolValue] : YES;
     NSInteger f = p[@"firstRow"] ? [p[@"firstRow"] integerValue] : 4;
     gFirstRow = (f == 3) ? 3 : 4;
 }
@@ -258,7 +270,7 @@ static char kScrollerKey;
 }
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)g {
-    if (!gEnabled) return NO;
+    if (!gEnabled || gGravityActive) return NO;
     SBIconController *c = [%c(SBIconController) sharedInstance];
     if ([c respondsToSelector:@selector(grabbedIcon)] && [c grabbedIcon]) return NO; // dragging an icon
     UIView *l = _list;
@@ -313,6 +325,167 @@ static char kScrollerKey;
 }
 @end
 
+#pragma mark - gravity
+
+static SBIconListView *currentRootList(void) {
+    SBIconListView *best = nil;
+    CGFloat bestD = CGFLOAT_MAX;
+    for (SBIconListView *l in gLists.allObjects) {
+        if (!l.window) continue;
+        CGRect r = [l convertRect:l.bounds toView:nil];
+        CGFloat d = fabs(r.origin.x);
+        if (d < bestD) { bestD = d; best = l; }
+    }
+    return bestD > 160 ? nil : best;   // Today page is on screen -> no list
+}
+
+static BOOL homeVisible(void) {
+    SpringBoard *sb = (SpringBoard *)[UIApplication sharedApplication];
+    if ([sb respondsToSelector:@selector(_accessibilityFrontMostApplication)] && [sb _accessibilityFrontMostApplication]) return NO;
+    Class lc = NSClassFromString(@"SBLockScreenManager");
+    id m = [lc respondsToSelector:@selector(sharedInstance)] ? [lc sharedInstance] : nil;
+    if ([m respondsToSelector:@selector(isUILocked)] && [m isUILocked]) return NO;
+    return YES;
+}
+
+// circle of the icon image inside the icon view (label excluded)
+static CGRect iconCircleRect(UIView *iv) {
+    UIView *img = nil;
+    @try { img = [iv valueForKey:@"iconImageView"]; } @catch (NSException *e) {}
+    if ([img isKindOfClass:[UIView class]] && img.superview == iv) return img.frame;
+    CGFloat d = MIN(iv.bounds.size.width, 60.0);
+    return CGRectMake((iv.bounds.size.width - d) / 2.0, 0, d, d);
+}
+
+@interface CIRGravity : NSObject
++ (instancetype)shared;
+- (void)startMonitoring;
+- (void)endAnimated:(BOOL)animated;
+@end
+
+@implementation CIRGravity {
+    CMMotionManager *_mm;
+    UIDynamicAnimator *_animator;
+    UIGravityBehavior *_gravity;
+    NSArray *_items;
+    __weak SBIconListView *_list;
+    BOOL _active;
+    CFTimeInterval _lastShake;
+}
+
++ (instancetype)shared {
+    static CIRGravity *g;
+    static dispatch_once_t t;
+    dispatch_once(&t, ^{ g = [CIRGravity new]; });
+    return g;
+}
+
+- (void)startMonitoring {
+    if (_mm) return;
+    _mm = [CMMotionManager new];
+    if (!_mm.accelerometerAvailable) { CIRLog(@"gravity: no accelerometer"); return; }
+    _mm.accelerometerUpdateInterval = 1.0 / 20.0;
+    __weak CIRGravity *w = self;
+    [_mm startAccelerometerUpdatesToQueue:[NSOperationQueue mainQueue] withHandler:^(CMAccelerometerData *d, NSError *e) {
+        if (d) [w tick:d.acceleration];
+    }];
+    CIRLog(@"gravity: monitoring started");
+}
+
+- (void)tick:(CMAcceleration)a {
+    if (_active) _gravity.gravityDirection = CGVectorMake(a.x, -a.y);   // follow the tilt
+    if (!gEnabled || !gGravity) return;
+    double mag = sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+    CFTimeInterval now = CACurrentMediaTime();
+    if (mag > 2.4 && now - _lastShake > 1.2) {                          // shake
+        _lastShake = now;
+        if (_active) [self endAnimated:YES];
+        else if (homeVisible()) [self start];
+    }
+}
+
+- (void)start {
+    SBIconListView *list = currentRootList();
+    if (!list) return;
+    SBIconController *c = [%c(SBIconController) sharedInstance];
+    if ([c respondsToSelector:@selector(isEditing)] && [c isEditing]) return;
+
+    // only what is on screen right now falls
+    CGRect vis = [list convertRect:list.window.bounds fromView:list.window];
+    NSMutableArray *items = [NSMutableArray array];
+    for (UIView *v in list.subviews) {
+        if (![v isKindOfClass:%c(SBIconView)]) continue;
+        if (v.hidden || v.alpha < 0.1) continue;
+        if (CGRectContainsPoint(CGRectInset(vis, 0, 40), v.center)) [items addObject:v];
+    }
+    CIRLog(@"gravity: start, %lu icons, vis=%@", (unsigned long)items.count, NSStringFromCGRect(vis));
+    if (items.count == 0) return;
+
+    gGravityActive = YES;   // before behaviors: collision shapes are read now
+    _list = list;
+    _items = items;
+    _active = YES;
+
+    _animator = [[UIDynamicAnimator alloc] initWithReferenceView:list];
+    _gravity = [[UIGravityBehavior alloc] initWithItems:items];
+    UICollisionBehavior *col = [[UICollisionBehavior alloc] initWithItems:items];
+    CGFloat l = CGRectGetMinX(vis), r = CGRectGetMaxX(vis), t = CGRectGetMinY(vis), b = CGRectGetMaxY(vis) - 6;
+    [col addBoundaryWithIdentifier:@"l" fromPoint:CGPointMake(l, t) toPoint:CGPointMake(l, b)];
+    [col addBoundaryWithIdentifier:@"r" fromPoint:CGPointMake(r, t) toPoint:CGPointMake(r, b)];
+    [col addBoundaryWithIdentifier:@"f" fromPoint:CGPointMake(l, b) toPoint:CGPointMake(r, b)];
+    [col addBoundaryWithIdentifier:@"c" fromPoint:CGPointMake(l, t) toPoint:CGPointMake(r, t)];
+    UIDynamicItemBehavior *p = [[UIDynamicItemBehavior alloc] initWithItems:items];
+    p.allowsRotation = NO;
+    p.elasticity = 0.25;
+    p.friction = 0.4;
+    p.resistance = 0.15;
+    [_animator addBehavior:_gravity];
+    [_animator addBehavior:col];
+    [_animator addBehavior:p];
+}
+
+- (void)endAnimated:(BOOL)animated {
+    if (!_active) return;
+    SBIconListView *list = _list;
+    NSArray *items = _items;
+    [_animator removeAllBehaviors];
+    _animator = nil;
+    _gravity = nil;
+    _items = nil;
+    _active = NO;
+    gGravityActive = NO;
+    CIRLog(@"gravity: end animated=%d", animated);
+    if (!list) return;
+
+    void (^restore)(void) = ^{
+        NSArray *icons = [list respondsToSelector:@selector(icons)] ? [list icons] : nil;
+        for (UIView *v in items) {
+            v.transform = CGAffineTransformIdentity;
+            id icon = [(SBIconView *)v icon];
+            NSUInteger i = icon ? [icons indexOfObject:icon] : NSNotFound;
+            if (i == NSNotFound) continue;
+            CGPoint o = circularOrigin(list, i);
+            v.center = CGPointMake(o.x + v.bounds.size.width / 2.0, o.y + v.bounds.size.height / 2.0);
+        }
+    };
+    void (^resync)(void) = ^{
+        if ([list respondsToSelector:@selector(layoutIconsNow)]) [(id)list performSelector:@selector(layoutIconsNow)];
+    };
+    if (animated) {
+        [UIView animateWithDuration:0.5 delay:0 options:UIViewAnimationOptionCurveEaseInOut
+                         animations:restore completion:^(BOOL f) { resync(); }];
+    } else {
+        restore();
+        resync();
+    }
+}
+@end
+
+static void lockChanged(CFNotificationCenterRef c, void *o, CFStringRef n, const void *obj, CFDictionaryRef u) {
+    [[CIRGravity shared] endAnimated:NO];   // locking the screen puts everything back
+}
+
+
 #pragma mark - merge all pages into one
 
 static void circularMerge(void) {
@@ -362,12 +535,52 @@ static void circularMerge(void) {
 
 - (void)didMoveToWindow {
     %orig;
+    if (self.window && isRootList(self)) {
+        if (!gLists) gLists = [NSHashTable weakObjectsHashTable];
+        [gLists addObject:self];
+    }
     if (gEnabled && self.window && isRootList(self) && !objc_getAssociatedObject(self, &kScrollerKey)) {
         CIRScroller *s = [[CIRScroller alloc] initWithList:self];
         objc_setAssociatedObject(self, &kScrollerKey, s, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
 
+%end
+
+%hook SBIconView
+
+// circular collision shape while gravity is on
+- (UIDynamicItemCollisionBoundsType)collisionBoundsType {
+    return gGravityActive ? UIDynamicItemCollisionBoundsTypePath : %orig;
+}
+
+- (UIBezierPath *)collisionBoundingPath {
+    if (!gGravityActive) return %orig;
+    CGRect r = iconCircleRect(self);
+    CGPoint c = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+    CGFloat rad = MIN(r.size.width, r.size.height) / 2.0;
+    CGPoint m = CGPointMake(CGRectGetMidX(r) - c.x, CGRectGetMidY(r) - c.y);
+    UIBezierPath *path = [UIBezierPath bezierPath];
+    const int N = 20;
+    for (int k = 0; k < N; k++) {                      // counterclockwise polygon
+        CGFloat a = -2.0 * M_PI * k / N;
+        CGPoint pt = CGPointMake(m.x + rad * cos(a), m.y + rad * sin(a));
+        if (k == 0) [path moveToPoint:pt]; else [path addLineToPoint:pt];
+    }
+    [path closePath];
+    return path;
+}
+
+%end
+
+// SpringBoard must not put icons back while they are falling
+%group LayoutGuard
+%hook SBIconListView
+- (void)layoutIconsNow {
+    if (gGravityActive && isRootList(self)) return;
+    %orig;
+}
+%end
 %end
 
 %hook SBIconImageView
@@ -435,6 +648,14 @@ static void circularMerge(void) {
         CFSTR("com.cursorus.circular/prefschanged"), NULL, CFNotificationSuspensionBehaviorCoalesce);
 
     %init;
+
+    Class lvv = NSClassFromString(@"SBIconListView");
+    if (lvv && class_getInstanceMethod(lvv, @selector(layoutIconsNow))) { %init(LayoutGuard); }
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, lockChanged,
+        CFSTR("com.apple.springboard.lockcomplete"), NULL, CFNotificationSuspensionBehaviorCoalesce);
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, lockChanged,
+        CFSTR("com.apple.springboard.hasBlankedScreen"), NULL, CFNotificationSuspensionBehaviorCoalesce);
+    dispatch_async(dispatch_get_main_queue(), ^{ [[CIRGravity shared] startMonitoring]; });
 
     Class lm = NSClassFromString(@"SBIconListModel");
     Class lv = NSClassFromString(@"SBIconListView");

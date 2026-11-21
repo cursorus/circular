@@ -6,6 +6,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = circular
 circular_FILES = Tweak.x
+circular_FRAMEWORKS = UIKit CoreMotion
 circular_CFLAGS = -fobjc-arc
 
 include $(THEOS_MAKE_PATH)/tweak.mk
