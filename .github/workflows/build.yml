@@ -29,6 +29,9 @@ jobs:
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           git clone --depth 1 https://github.com/theos/sdks.git /tmp/sdks
           cp -R /tmp/sdks/*.sdk "$HOME/theos/sdks/"
+           
+      - name: Set version
+        run: sed -i '' "s/^Version:.*/Version: 0.0.${{ github.run_number }}/" "$DIR/control"
 
       - name: Build
         run: cd "$DIR" && gmake package FINALPACKAGE=1
